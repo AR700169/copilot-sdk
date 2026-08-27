@@ -7,6 +7,10 @@ See [GitHub Releases](https://github.com/github/copilot-sdk/releases) for the fu
 
 ## [Unreleased]
 
+### Feature: selectable `ask_user` session behavior
+
+Session create and cold resume now accept a language-specific `askUserVariant` option with `legacy` and `elicitation` values. SDK sessions retain the legacy question-and-answer tool by default. Select `elicitation` and provide an elicitation handler to expose the structured form-based `ask_user` tool.
+
 ### Feature: rotating session-scoped GitHub credentials
 
 All six SDKs can now acquire short-lived GitHub credentials through a session-scoped callback. The SDK registers the callback before session create or resume, maps `initial` and `refresh` requests to the owning session, and removes registrations on rollback, replacement, session close, and client close. Static per-session `gitHubToken` credentials remain supported and are mutually exclusive with the callback.
