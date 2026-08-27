@@ -4,35 +4,25 @@ import { copyFile, mkdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it, vi } from "vitest";
-import { approveAll, FactoryResumeError } from "../../src/index.js";
+import { approveAll, FactoryResumeError, RuntimeConnection } from "../../src/index.js";
 import {
     createSdkTestContext,
     DEFAULT_GITHUB_TOKEN,
-    isInProcessTransport,
+    getLegacyCliPathForTests,
 } from "./harness/sdkTestContext.js";
 import { retry } from "./harness/sdkTestHelper.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// TODO(PR #2395): Temporarily disable extension-authored factory E2E coverage while this PR
-// transitions managed out-of-process SDK launches to the Rust-only flow. Re-enable when that
-// flow provides the Node extension subprocess lifecycle required to load factory-extension.mjs.
-const factoryTestsDisabledForRustOnlyFlow = true;
-const factoryTestContext =
-    isInProcessTransport || factoryTestsDisabledForRustOnlyFlow
-        ? undefined
-        : await createSdkTestContext({
-              copilotClientOptions: {
-                  env: {
-                      COPILOT_CLI_ENABLED_FEATURE_FLAGS: "EXTENSIONS,AGENT_FACTORIES",
-                  },
-              },
-          });
+const factoryTestContext = await createSdkTestContext({
+    copilotClientOptions: {
+        connection: RuntimeConnection.forStdio({ path: getLegacyCliPathForTests() }),
+        env: {
+            COPILOT_CLI_ENABLED_FEATURE_FLAGS: "EXTENSIONS,AGENT_FACTORIES",
+        },
+    },
+});
 
 async function setupFactoryExtension(workDir: string, onPermissionRequest = approveAll) {
-    if (!factoryTestContext) {
-        throw new Error("Factory E2E requires the stdio transport");
-    }
-
     const { copilotClient, openAiEndpoint } = factoryTestContext;
     const extensionDir = join(workDir, ".github", "extensions", "factory-smoke");
     const readyFile = join(extensionDir, "ready");
@@ -78,25 +68,19 @@ async function setupFactoryExtension(workDir: string, onPermissionRequest = appr
     return session;
 }
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "runs an extension-authored factory across the SDK process boundary",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        await using session = await setupFactoryExtension(workDir);
+it("runs an extension-authored factory across the SDK process boundary", async () => {
+    const { workDir } = factoryTestContext;
+    await using session = await setupFactoryExtension(workDir);
 
-        const result = await session.factory.run("argument-echo", {
-            args: { source: "sdk-e2e", count: 11 },
-        });
+    const result = await session.factory.run("argument-echo", {
+        args: { source: "sdk-e2e", count: 11 },
+    });
 
-        expect(result).toMatchObject({
-            status: "completed",
-            result: { source: "sdk-e2e", count: 11 },
-        });
-    }
-);
+    expect(result).toMatchObject({
+        status: "completed",
+        result: { source: "sdk-e2e", count: 11 },
+    });
+});
 
 // TODO(cli-1.0.81-2): the subagent request is rejected downstream under CLI 1.0.81-2, so the
 // fixture reports didThrow: true. Re-enable once the runtime fix ships.
@@ -118,199 +102,171 @@ it.skip("forwards every declared subagent option to the runtime", async () => {
     });
 }, 60_000);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "throws FactoryResumeError with not_found for an unknown run",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        await using session = await setupFactoryExtension(workDir);
-
-        const error = await session.factory
-            .resume("00000000-0000-0000-0000-000000000000")
-            .catch((caught: unknown) => caught);
-
-        expect(error).toBeInstanceOf(FactoryResumeError);
-        expect((error as FactoryResumeError).code).toBe("not_found");
+it("throws FactoryResumeError with not_found for an unknown run", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    await using session = await setupFactoryExtension(workDir);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "throws FactoryResumeError with non_resumable for a completed run",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        await using session = await setupFactoryExtension(workDir);
+    const error = await session.factory
+        .resume("00000000-0000-0000-0000-000000000000")
+        .catch((caught: unknown) => caught);
 
-        const run = await session.factory.run("argument-echo");
-        const error = await session.factory.resume(run.runId).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(FactoryResumeError);
+    expect((error as FactoryResumeError).code).toBe("not_found");
+});
 
-        expect(error).toBeInstanceOf(FactoryResumeError);
-        expect((error as FactoryResumeError).code).toBe("non_resumable");
+it("throws FactoryResumeError with non_resumable for a completed run", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    await using session = await setupFactoryExtension(workDir);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "runs a factory when its session denies every permission request",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        const denyPermissions = vi.fn(() => ({ kind: "reject" as const }));
-        await using session = await setupFactoryExtension(workDir, denyPermissions);
+    const run = await session.factory.run("argument-echo");
+    const error = await session.factory.resume(run.runId).catch((caught: unknown) => caught);
 
-        await expect(session.factory.run("argument-echo")).resolves.toMatchObject({
-            status: "completed",
-        });
-        expect(denyPermissions).not.toHaveBeenCalled();
+    expect(error).toBeInstanceOf(FactoryResumeError);
+    expect((error as FactoryResumeError).code).toBe("non_resumable");
+});
+
+it("runs a factory when its session denies every permission request", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    const denyPermissions = vi.fn(() => ({ kind: "reject" as const }));
+    await using session = await setupFactoryExtension(workDir, denyPermissions);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "resumes a failed factory when its session denies every permission request",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        const denyPermissions = vi.fn(() => ({ kind: "reject" as const }));
-        await using session = await setupFactoryExtension(workDir, denyPermissions);
+    await expect(session.factory.run("argument-echo")).resolves.toMatchObject({
+        status: "completed",
+    });
+    expect(denyPermissions).not.toHaveBeenCalled();
+});
 
-        const failedRun = await session.factory.run("fails-once");
-        expect(failedRun).toMatchObject({
-            status: "error",
-        });
-
-        await expect(session.factory.resume(failedRun.runId)).resolves.toMatchObject({
-            status: "completed",
-            result: "resumed",
-        });
-        expect(denyPermissions).not.toHaveBeenCalled();
+it("resumes a failed factory when its session denies every permission request", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    const denyPermissions = vi.fn(() => ({ kind: "reject" as const }));
+    await using session = await setupFactoryExtension(workDir, denyPermissions);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "refuses a factory started through the context session from a factory body",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        await using session = await setupFactoryExtension(workDir);
+    const failedRun = await session.factory.run("fails-once");
+    expect(failedRun).toMatchObject({
+        status: "error",
+    });
 
-        const result = await session.factory.run("starts-from-context-session");
+    await expect(session.factory.resume(failedRun.runId)).resolves.toMatchObject({
+        status: "completed",
+        result: "resumed",
+    });
+    expect(denyPermissions).not.toHaveBeenCalled();
+});
 
-        expect(result).toMatchObject({
-            status: "completed",
-            result: expect.stringContaining("factory.run and factory.resume"),
-        });
-        expect((result as { result: string }).result).toContain("factory body");
+it("refuses a factory started through the context session from a factory body", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    await using session = await setupFactoryExtension(workDir);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "refuses a factory started through the module session from a factory body",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        await using session = await setupFactoryExtension(workDir);
+    const result = await session.factory.run("starts-from-context-session");
 
-        const result = await session.factory.run("starts-from-module-session");
+    expect(result).toMatchObject({
+        status: "completed",
+        result: expect.stringContaining("factory.run and factory.resume"),
+    });
+    expect((result as { result: string }).result).toContain("factory body");
+});
 
-        expect(result).toMatchObject({
-            status: "completed",
-            result: expect.stringContaining("factory.run and factory.resume"),
-        });
-        expect((result as { result: string }).result).toContain("factory body");
+it("refuses a factory started through the module session from a factory body", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    await using session = await setupFactoryExtension(workDir);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "allows a module-level extension watcher to start a factory while another body is parked",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        const extensionDir = join(workDir, ".github", "extensions", "factory-smoke");
-        await using session = await setupFactoryExtension(workDir);
+    const result = await session.factory.run("starts-from-module-session");
 
-        const parked = session.factory.run("parked");
-        await retry(
-            "wait for the parked factory to enter its body",
-            async () => {
-                expect(existsSync(join(extensionDir, "entered"))).toBe(true);
-            },
-            100,
-            100
-        );
+    expect(result).toMatchObject({
+        status: "completed",
+        result: expect.stringContaining("factory.run and factory.resume"),
+    });
+    expect((result as { result: string }).result).toContain("factory body");
+});
 
-        writeFileSync(join(extensionDir, "start-b"), "start");
-        const bResultFile = join(extensionDir, "b-result");
-        await retry(
-            "wait for the module-level watcher factory run to succeed",
-            async () => {
-                expect(existsSync(bResultFile)).toBe(true);
-                expect(JSON.parse(readFileSync(bResultFile, "utf8"))).toMatchObject({
-                    status: "success",
-                    result: {
-                        status: "completed",
-                        result: { source: "module-watcher" },
-                    },
-                });
-            },
-            100,
-            100
-        );
-
-        writeFileSync(join(extensionDir, "release"), "release");
-        await expect(parked).resolves.toMatchObject({
-            status: "completed",
-            result: "released",
-        });
-    },
-    60_000
-);
-
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "returns an array result from an extension-authored factory",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        await using session = await setupFactoryExtension(workDir);
-
-        const result = await session.factory.run("array-result");
-
-        expect(result).toMatchObject({
-            status: "completed",
-            result: [1, "two", false],
-        });
+it("allows a module-level extension watcher to start a factory while another body is parked", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    const extensionDir = join(workDir, ".github", "extensions", "factory-smoke");
+    await using session = await setupFactoryExtension(workDir);
 
-it.skipIf(isInProcessTransport || factoryTestsDisabledForRustOnlyFlow)(
-    "passes array factory arguments across the SDK process boundary",
-    async () => {
-        if (!factoryTestContext) {
-            throw new Error("Factory E2E requires the stdio transport");
-        }
-        const { workDir } = factoryTestContext;
-        await using session = await setupFactoryExtension(workDir);
+    const parked = session.factory.run("parked");
+    await retry(
+        "wait for the parked factory to enter its body",
+        async () => {
+            expect(existsSync(join(extensionDir, "entered"))).toBe(true);
+        },
+        100,
+        100
+    );
 
-        const args = [1, "two", false];
-        const result = await session.factory.run("argument-echo", { args });
+    writeFileSync(join(extensionDir, "start-b"), "start");
+    const bResultFile = join(extensionDir, "b-result");
+    await retry(
+        "wait for the module-level watcher factory run to succeed",
+        async () => {
+            expect(existsSync(bResultFile)).toBe(true);
+            expect(JSON.parse(readFileSync(bResultFile, "utf8"))).toMatchObject({
+                status: "success",
+                result: {
+                    status: "completed",
+                    result: { source: "module-watcher" },
+                },
+            });
+        },
+        100,
+        100
+    );
 
-        expect(result).toMatchObject({
-            status: "completed",
-            result: args,
-        });
+    writeFileSync(join(extensionDir, "release"), "release");
+    await expect(parked).resolves.toMatchObject({
+        status: "completed",
+        result: "released",
+    });
+}, 60_000);
+
+it("returns an array result from an extension-authored factory", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
     }
-);
+    const { workDir } = factoryTestContext;
+    await using session = await setupFactoryExtension(workDir);
+
+    const result = await session.factory.run("array-result");
+
+    expect(result).toMatchObject({
+        status: "completed",
+        result: [1, "two", false],
+    });
+});
+
+it("passes array factory arguments across the SDK process boundary", async () => {
+    if (!factoryTestContext) {
+        throw new Error("Factory E2E requires the stdio transport");
+    }
+    const { workDir } = factoryTestContext;
+    await using session = await setupFactoryExtension(workDir);
+
+    const args = [1, "two", false];
+    const result = await session.factory.run("argument-echo", { args });
+
+    expect(result).toMatchObject({
+        status: "completed",
+        result: args,
+    });
+});
