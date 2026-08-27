@@ -2741,7 +2741,9 @@ export class CopilotClient {
                     const stderrOutput = this.stderrBuffer.trim();
                     if (stderrOutput) {
                         rejectProcessExit(
-                            new Error(`CLI server exited with code ${code}\nstderr: ${stderrOutput}`)
+                            new Error(
+                                `CLI server exited with code ${code}\nstderr: ${stderrOutput}`
+                            )
                         );
                     } else {
                         rejectProcessExit(
